@@ -44,6 +44,10 @@ const (
 	UserCommandThrottleReasonHint                    = "UserCommandThrottleReasonHint"
 )
 
+const (
+	HTTPStatusOK = 200
+)
+
 var (
 	envVariableRegexp = regexp.MustCompile("[$][{](.*)[}]")
 )
@@ -99,6 +103,7 @@ type MigrationContext struct {
 	ThrottleFlagFile                    string
 	ThrottleAdditionalFlagFile          string
 	throttleQuery                       string
+	throttleHTTP                        string
 	ThrottleCommandedByUser             int64
 	maxLoad                             LoadMap
 	criticalLoad                        LoadMap
@@ -148,6 +153,7 @@ type MigrationContext struct {
 	pointOfInterestTime                    time.Time
 	pointOfInterestTimeMutex               *sync.Mutex
 	CurrentLag                             int64
+	ThrottleHTTPStatusCode                 int64
 	controlReplicasLagResult               mysql.ReplicationLagResult
 	TotalRowsCopied                        int64
 	TotalDMLEventsApplied                  int64
@@ -157,6 +163,7 @@ type MigrationContext struct {
 	throttleReasonHint                     ThrottleReasonHint
 	throttleGeneralCheckResult             ThrottleCheckResult
 	throttleMutex                          *sync.Mutex
+	throttleHTTPMutex                      *sync.Mutex
 	IsPostponingCutOver                    int64
 	CountingRowsFlag                       int64
 	AllEventsUpToLockProcessedInjectedFlag int64
@@ -174,12 +181,15 @@ type MigrationContext struct {
 	UniqueKey                        *sql.UniqueKey
 	SharedColumns                    *sql.ColumnList
 	ColumnRenameMap                  map[string]string
+	DroppedColumnsMap                map[string]bool
 	MappedSharedColumns              *sql.ColumnList
 	MigrationRangeMinValues          *sql.ColumnValues
 	MigrationRangeMaxValues          *sql.ColumnValues
 	Iteration                        int64
 	MigrationIterationRangeMinValues *sql.ColumnValues
 	MigrationIterationRangeMaxValues *sql.ColumnValues
+
+	recentBinlogCoordinates mysql.BinlogCoordinates
 
 	CanStopStreaming func() bool
 }
@@ -215,6 +225,7 @@ func newMigrationContext() *MigrationContext {
 		maxLoad:                             NewLoadMap(),
 		criticalLoad:                        NewLoadMap(),
 		throttleMutex:                       &sync.Mutex{},
+		throttleHTTPMutex:                   &sync.Mutex{},
 		throttleControlReplicaKeys:          mysql.NewInstanceKeyMap(),
 		configMutex:                         &sync.Mutex{},
 		pointOfInterestTimeMutex:            &sync.Mutex{},
@@ -472,12 +483,10 @@ func (this *MigrationContext) IsThrottled() (bool, string, ThrottleReasonHint) {
 }
 
 func (this *MigrationContext) GetThrottleQuery() string {
-	var query string
-
 	this.throttleMutex.Lock()
 	defer this.throttleMutex.Unlock()
 
-	query = this.throttleQuery
+	var query = this.throttleQuery
 	return query
 }
 
@@ -486,6 +495,21 @@ func (this *MigrationContext) SetThrottleQuery(newQuery string) {
 	defer this.throttleMutex.Unlock()
 
 	this.throttleQuery = newQuery
+}
+
+func (this *MigrationContext) GetThrottleHTTP() string {
+	this.throttleHTTPMutex.Lock()
+	defer this.throttleHTTPMutex.Unlock()
+
+	var throttleHTTP = this.throttleHTTP
+	return throttleHTTP
+}
+
+func (this *MigrationContext) SetThrottleHTTP(throttleHTTP string) {
+	this.throttleHTTPMutex.Lock()
+	defer this.throttleHTTPMutex.Unlock()
+
+	this.throttleHTTP = throttleHTTP
 }
 
 func (this *MigrationContext) GetMaxLoad() LoadMap {
@@ -520,6 +544,19 @@ func (this *MigrationContext) SetNiceRatio(newRatio float64) {
 	this.throttleMutex.Lock()
 	defer this.throttleMutex.Unlock()
 	this.niceRatio = newRatio
+}
+
+func (this *MigrationContext) GetRecentBinlogCoordinates() mysql.BinlogCoordinates {
+	this.throttleMutex.Lock()
+	defer this.throttleMutex.Unlock()
+
+	return this.recentBinlogCoordinates
+}
+
+func (this *MigrationContext) SetRecentBinlogCoordinates(coordinates mysql.BinlogCoordinates) {
+	this.throttleMutex.Lock()
+	defer this.throttleMutex.Unlock()
+	this.recentBinlogCoordinates = coordinates
 }
 
 // ReadMaxLoad parses the `--max-load` flag, which is in multiple key-value format,
